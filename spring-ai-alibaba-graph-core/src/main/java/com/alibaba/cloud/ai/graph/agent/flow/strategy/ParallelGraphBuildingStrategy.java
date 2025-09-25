@@ -16,8 +16,9 @@
 package com.alibaba.cloud.ai.graph.agent.flow.strategy;
 
 import com.alibaba.cloud.ai.graph.StateGraph;
-import com.alibaba.cloud.ai.graph.agent.BaseAgent;
+import com.alibaba.cloud.ai.graph.agent.Agent;
 import com.alibaba.cloud.ai.graph.agent.flow.agent.FlowAgent;
+import com.alibaba.cloud.ai.graph.agent.flow.agent.ParallelAgent;
 import com.alibaba.cloud.ai.graph.agent.flow.builder.FlowGraphBuilder;
 import com.alibaba.cloud.ai.graph.agent.flow.enums.FlowAgentEnum;
 import com.alibaba.cloud.ai.graph.agent.flow.node.EnhancedParallelResultAggregator;
@@ -41,11 +42,11 @@ public class ParallelGraphBuildingStrategy implements FlowGraphBuildingStrategy 
 		validateParallelConfig(config);
 
 		StateGraph graph = new StateGraph(config.getName(), config.getKeyStrategyFactory());
-		BaseAgent rootAgent = config.getRootAgent();
+		ParallelAgent rootAgent = (ParallelAgent) config.getRootAgent();
 
 		// Add root transparent node
 		graph.addNode(rootAgent.name(),
-				node_async(new TransparentNode(rootAgent.outputKey(), ((FlowAgent) rootAgent).inputKey())));
+				node_async(new TransparentNode()));
 
 		// Add starting edge
 		graph.addEdge(START, rootAgent.name());
@@ -60,18 +61,18 @@ public class ParallelGraphBuildingStrategy implements FlowGraphBuildingStrategy 
 
 		if (mergeStrategy != null || maxConcurrency != null) {
 			// Use enhanced aggregator with custom merge strategy and concurrency control
-			graph.addNode(aggregatorNodeName, node_async(new EnhancedParallelResultAggregator(rootAgent.outputKey(),
+			graph.addNode(aggregatorNodeName, node_async(new EnhancedParallelResultAggregator(rootAgent.mergeOutputKey(),
 					config.getSubAgents(), mergeStrategy, maxConcurrency)));
 		}
 		else {
 			// Use basic aggregator
-			graph.addNode(aggregatorNodeName, node_async(new ParallelResultAggregator(rootAgent.outputKey())));
+			graph.addNode(aggregatorNodeName, node_async(new ParallelResultAggregator(rootAgent.mergeOutputKey())));
 		}
 
 		// Process sub-agents for parallel execution
-		for (BaseAgent subAgent : config.getSubAgents()) {
+		for (Agent subAgent : config.getSubAgents()) {
 			// Add the current sub-agent as a node
-			graph.addNode(subAgent.name(), subAgent.asAsyncNodeAction(rootAgent.outputKey(), subAgent.outputKey()));
+			FlowGraphBuildingStrategy.addSubAgentNode(subAgent, graph);
 			// Connect root to each sub-agent (fan-out)
 			graph.addEdge(rootAgent.name(), subAgent.name());
 			// Connect each sub-agent to aggregator (gather)

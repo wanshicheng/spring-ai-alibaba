@@ -15,8 +15,8 @@
  */
 package com.alibaba.cloud.ai.graph.executor;
 
-import com.alibaba.cloud.ai.graph.GraphRunnerContext;
 import com.alibaba.cloud.ai.graph.GraphResponse;
+import com.alibaba.cloud.ai.graph.GraphRunnerContext;
 import com.alibaba.cloud.ai.graph.NodeOutput;
 import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.action.AsyncNodeActionWithConfig;
@@ -26,8 +26,6 @@ import com.alibaba.cloud.ai.graph.action.InterruptionMetadata;
 import com.alibaba.cloud.ai.graph.async.AsyncGenerator;
 import com.alibaba.cloud.ai.graph.exception.RunnableErrors;
 import com.alibaba.cloud.ai.graph.streaming.StreamingOutput;
-import reactor.core.publisher.Flux;
-import reactor.core.publisher.Mono;
 
 import java.util.List;
 import java.util.Map;
@@ -35,6 +33,9 @@ import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
+
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 
 import static com.alibaba.cloud.ai.graph.GraphRunnerContext.INTERRUPT_AFTER;
 import static com.alibaba.cloud.ai.graph.StateGraph.NODE_AFTER;
@@ -85,7 +86,7 @@ public class NodeExecutor extends BaseGraphExecutor {
 
 			if (action instanceof InterruptableAction) {
 				Optional<InterruptionMetadata> interruptMetadata = ((InterruptableAction) action)
-					.interrupt(currentNodeId, context.cloneState(context.getCurrentState()));
+					.interrupt(currentNodeId, context.cloneState(context.getCurrentStateData()));
 				if (interruptMetadata.isPresent()) {
 					resultValue.set(interruptMetadata.get());
 					return Flux.just(GraphResponse.done(interruptMetadata.get()));
@@ -132,8 +133,7 @@ public class NodeExecutor extends BaseGraphExecutor {
 				return handleEmbeddedGenerator(context, embedGenerator.get(), updateState, resultValue);
 			}
 
-			context.updateCurrentState(updateState);
-			context.getOverallState().updateState(updateState);
+			context.updateState(updateState);
 
 			if (context.getCompiledGraph().compileConfig.interruptBeforeEdge()
 					&& context.getCompiledGraph().compileConfig.interruptsAfter()
@@ -141,9 +141,9 @@ public class NodeExecutor extends BaseGraphExecutor {
 				context.setNextNodeId(INTERRUPT_AFTER);
 			}
 			else {
-				Command nextCommand = context.nextNodeId(context.getCurrentNodeId(), context.getCurrentState());
+				Command nextCommand = context.nextNodeId(context.getCurrentNodeId(), context.getCurrentStateData());
 				context.setNextNodeId(nextCommand.gotoNode());
-				context.updateCurrentState(nextCommand.update());
+				context.setCurrentStatData(nextCommand.update());
 			}
 
 			NodeOutput output = context.buildCurrentNodeOutput();
@@ -174,8 +174,15 @@ public class NodeExecutor extends BaseGraphExecutor {
 					org.springframework.ai.chat.model.ChatResponse lastResponse = lastChatResponseRef.get();
 					if (lastResponse == null) {
 						GraphResponse<NodeOutput> lastGraphResponse = GraphResponse
-							.of(new StreamingOutput(response, context.getCurrentNodeId(), context.getOverallState()));
+							.of(new StreamingOutput(response.getResult().getOutput().getText(), context.getCurrentNodeId(), context.getOverallState()));
 						lastChatResponseRef.set(response);
+						lastGraphResponseRef.set(lastGraphResponse);
+						return lastGraphResponse;
+					}
+
+					if (response.getResult() == null) {
+						GraphResponse<NodeOutput> lastGraphResponse = GraphResponse
+								.of(new StreamingOutput("", context.getCurrentNodeId(), context.getOverallState()));
 						lastGraphResponseRef.set(lastGraphResponse);
 						return lastGraphResponse;
 					}
@@ -205,9 +212,9 @@ public class NodeExecutor extends BaseGraphExecutor {
 							List.of(newGeneration), response.getMetadata());
 					lastChatResponseRef.set(newResponse);
 					GraphResponse<NodeOutput> lastGraphResponse = GraphResponse
-						.of(new StreamingOutput(newResponse.getResult().getOutput().getText(),
-								context.getCurrentNodeId(), context.getOverallState()));
-					lastGraphResponseRef.set(lastGraphResponse);
+						.of(new StreamingOutput(response.getResult().getOutput().getText(), context.getCurrentNodeId(),
+								context.getOverallState()));
+					// lastGraphResponseRef.set(lastGraphResponse);
 					return lastGraphResponse;
 				}
 				else if (element instanceof GraphResponse) {
@@ -286,20 +293,17 @@ public class NodeExecutor extends BaseGraphExecutor {
 				return;
 			}
 
+			Map<String, Object> partialStateWithoutFlux = partialState.entrySet()
+					.stream()
+					.filter(e -> !(e.getValue() instanceof Flux))
+					.collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+
+			context.updateState(partialStateWithoutFlux);
+
 			if (nodeResultValue.isPresent()) {
 				Object value = nodeResultValue.get();
 				if (value instanceof Map<?, ?>) {
-					Map<String, Object> partialStateWithoutFlux = partialState.entrySet()
-						.stream()
-						.filter(e -> !(e.getValue() instanceof Flux))
-						.collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
-
-					Map<String, Object> intermediateState = OverAllState.updateState(context.getCurrentState(),
-							partialStateWithoutFlux, context.getKeyStrategyMap());
-					var currentState = OverAllState.updateState(intermediateState, (Map<String, Object>) value,
-							context.getKeyStrategyMap());
-					context.updateCurrentState(currentState);
-					context.getOverallState().updateState(currentState);
+					context.updateState((Map<String, Object>) value);
 				}
 				else {
 					throw new IllegalArgumentException("Node stream must return Map result using Data.done(),");
@@ -307,9 +311,12 @@ public class NodeExecutor extends BaseGraphExecutor {
 			}
 
 			try {
-				Command nextCommand = context.nextNodeId(context.getCurrentNodeId(), context.getCurrentState());
+				Command nextCommand = context.nextNodeId(context.getCurrentNodeId(), context.getCurrentStateData());
 				context.setNextNodeId(nextCommand.gotoNode());
-				context.updateCurrentState(nextCommand.update());
+				context.setCurrentStatData(nextCommand.update());
+
+				// save checkpoint after embedded flux completes
+				context.buildCurrentNodeOutput();
 			}
 			catch (Exception e) {
 				throw new RuntimeException(e);
@@ -372,11 +379,11 @@ public class NodeExecutor extends BaseGraphExecutor {
 								.filter(e -> !(e.getValue() instanceof Flux))
 								.collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
 
-							Map<String, Object> intermediateState = OverAllState.updateState(context.getCurrentState(),
+							Map<String, Object> intermediateState = OverAllState.updateState(context.getCurrentStateData(),
 									partialStateWithoutFlux, context.getKeyStrategyMap());
 							var currentState = OverAllState.updateState(intermediateState,
 									(Map<String, Object>) nodeResultValue, context.getKeyStrategyMap());
-							context.updateCurrentState(currentState);
+							context.setCurrentStatData(currentState);
 							context.getOverallState().updateState(currentState);
 						}
 						else {
@@ -391,9 +398,9 @@ public class NodeExecutor extends BaseGraphExecutor {
 			}
 		}).concatWith(Flux.defer(() -> {
 			try {
-				Command nextCommand = context.nextNodeId(context.getCurrentNodeId(), context.getCurrentState());
+				Command nextCommand = context.nextNodeId(context.getCurrentNodeId(), context.getCurrentStateData());
 				context.setNextNodeId(nextCommand.gotoNode());
-				context.updateCurrentState(nextCommand.update());
+				context.setCurrentStatData(nextCommand.update());
 
 				return mainGraphExecutor.execute(context, resultValue);
 			}

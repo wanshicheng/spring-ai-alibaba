@@ -19,7 +19,7 @@ import java.util.HashMap;
 import java.util.Map;
 
 import com.alibaba.cloud.ai.graph.StateGraph;
-import com.alibaba.cloud.ai.graph.agent.BaseAgent;
+import com.alibaba.cloud.ai.graph.agent.Agent;
 import com.alibaba.cloud.ai.graph.agent.flow.agent.FlowAgent;
 import com.alibaba.cloud.ai.graph.agent.flow.builder.FlowGraphBuilder;
 import com.alibaba.cloud.ai.graph.agent.flow.enums.FlowAgentEnum;
@@ -45,11 +45,11 @@ public class ConditionalGraphBuildingStrategy implements FlowGraphBuildingStrate
 		validateConditionalConfig(config);
 
 		StateGraph graph = new StateGraph(config.getName(), config.getKeyStrategyFactory());
-		BaseAgent rootAgent = config.getRootAgent();
+		Agent rootAgent = config.getRootAgent();
 
 		// Add root transparent node
 		graph.addNode(rootAgent.name(),
-				node_async(new TransparentNode(rootAgent.outputKey(), ((FlowAgent) rootAgent).inputKey())));
+				node_async(new TransparentNode()));
 
 		// Add starting edge
 		graph.addEdge(START, rootAgent.name());
@@ -61,16 +61,16 @@ public class ConditionalGraphBuildingStrategy implements FlowGraphBuildingStrate
 
 		// Process conditional agents
 		Map<String, String> conditionRoutingMap = new HashMap<>();
-		for (Map.Entry<String, BaseAgent> entry : config.getConditionalAgents().entrySet()) {
+		for (Map.Entry<String, Agent> entry : config.getConditionalAgents().entrySet()) {
 			String condition = entry.getKey();
-			BaseAgent agent = entry.getValue();
+			Agent subAgent = entry.getValue();
 
-			// Add the conditional agent as a node
-			graph.addNode(agent.name(), agent.asAsyncNodeAction(rootAgent.outputKey(), agent.outputKey()));
-			conditionRoutingMap.put(condition, agent.name());
+			FlowGraphBuildingStrategy.addSubAgentNode(subAgent, graph);
+
+			conditionRoutingMap.put(condition, subAgent.name());
 
 			// Connect agent to END
-			graph.addEdge(agent.name(), END);
+			graph.addEdge(subAgent.name(), END);
 		}
 
 		// Add default END condition if no conditions match
